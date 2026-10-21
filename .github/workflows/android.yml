@@ -46,6 +46,8 @@ jobs:
           CI_KEYSTORE_BASE64: ${{ secrets.ANDROID_CI_KEYSTORE_BASE64 }}
           CI_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_CI_KEYSTORE_PASSWORD }}
           CI_KEY_ALIAS: ${{ secrets.ANDROID_CI_KEY_ALIAS }}
+          # On a pull request github.sha is GitHub's temporary merge commit: name the APK after the commit you can see on the branch.
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           if [ "$HAS_CI_KEY" = "true" ]; then
@@ -68,7 +70,7 @@ jobs:
           bt="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
           v=$(sed -nE 's/^[[:space:]]*versionName = "([^"]+)".*/\1/p' app/build.gradle.kts)
           test -n "$v" || { echo "no versionName in app/build.gradle.kts"; exit 1; }
-          name="Coucou-Android-$v-${GITHUB_SHA::7}"
+          name="Coucou-Android-$v-${COMMIT::7}"
           release=app/build/outputs/apk/release/app-release-unsigned.apk
           debug=app/build/outputs/apk/debug/app-debug.apk
           test -f "$release" && test -f "$debug"
@@ -81,7 +83,7 @@ jobs:
           (cd apk && sha256sum *.apk > SHA256SUMS)
           echo "name=$name" >> "$GITHUB_OUTPUT"
           {
-            echo "### Coucou for Android $v (${GITHUB_SHA::7})"
+            echo "### Coucou for Android $v (${COMMIT::7})"
             echo
             echo "Download the **$name** artifact below, unzip it and open \`$name.apk\` on the phone (Android 11 or later)."
             echo "\`$name-debug.apk\` is the same app with its debug logs (\`adb logcat -s CoucouLive CoucouIsland\`)."
