@@ -337,13 +337,17 @@ class AppModel(private val context: Context) : LinkListener {
         refreshIsland()
     }
 
-    /** Android's answer may have changed in its own settings: look again when the app comes to the front. */
+    /**
+     * Android's answer may have changed in its own settings: look again when the app comes to the front. Only the Live Update
+     * follows at once. Coucou is on screen, so the island is away; it follows the new plan when the user leaves the app
+     * (`inForeground`). This keeps onStart from ever reaching the island's window (lint: RepeatOnLifecycleWrongUsage).
+     */
     fun refreshLiveSupport() {
         val now = notifier.liveSupport()
         livePromoted = notifier.livePromoted()
         if (now != liveSupport) {
             liveSupport = now
-            refreshIsland()
+            refreshLive()
         }
     }
 

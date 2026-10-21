@@ -75,6 +75,13 @@ class LiveUpdateSourceTest {
         assertTrue("never while disconnected", model.substringAfter("private fun liveAllowed()").substringBefore("/**").contains("Mode.PAIRED -> linkState == LinkState.CONNECTED"))
     }
 
+    @Test fun comingBackToTheAppNeverReachesTheIslandsWindow() {
+        // androidx.lifecycle's lint follows every call made from onStart; the island's window (MochiView's repeatOnLifecycle) must not be one.
+        val refresh = src("app/AppModel.kt").substringAfter("fun refreshLiveSupport()").substringBefore("private fun islandAllowed()")
+        assertTrue(refresh.contains("refreshLive()"))
+        assertFalse(refresh.contains("refreshIsland()") || refresh.contains("overlay."))
+    }
+
     @Test fun settingsOffersTheFourChoicesTheStatusAndTheIslandsSize() {
         val settings = src("ui/SettingsScreens.kt")
         for (s in listOf(
