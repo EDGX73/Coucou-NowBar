@@ -57,6 +57,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -77,6 +81,7 @@ import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.coucou.android.R
 import com.coucou.android.core.IslandBox
 import com.coucou.android.core.IslandGeometry
+import com.coucou.android.core.IslandSize
 import com.coucou.android.core.IslandSpec
 import com.coucou.android.core.IslandTimeline
 import com.coucou.android.core.OverlayPolicy
@@ -95,7 +100,8 @@ import com.coucou.android.mochi.MochiView
  * When it opens and closes is decided by [IslandTimeline] (pure, tested); this class only draws it
  * and keeps one timer, for the next deadline. Nothing exists while it is hidden: the window is added
  * when it opens and removed when it has gone up, so there is no timer and no frame loop.
- * Needs the user's one-time "display over other apps" permission.
+ * Needs the user's one-time "display over other apps" permission. Its width, height and text follow
+ * the user's [size] (Settings > Display), read each time it opens; 100 % is the island as it shipped.
  */
 class IslandOverlay(
     private val context: Context,
@@ -103,6 +109,7 @@ class IslandOverlay(
     private val onAllow: (fingerprint: String) -> Unit,
     private val onDeny: (fingerprint: String) -> Unit,
     private val onOpen: () -> Unit,
+    private val size: () -> IslandSize = { IslandSize.DEFAULT },
 ) {
     private val wm = context.getSystemService(WindowManager::class.java)
     private val main = Handler(Looper.getMainLooper())
@@ -216,7 +223,7 @@ class IslandOverlay(
         val cutout = insets.displayCutout?.boundingRectTop?.let { PxRect(it.left, it.top, it.right, it.bottom) }
         val statusBar = insets.getInsetsIgnoringVisibility(WindowInsets.Type.statusBars()).top
             .takeIf { it > 0 } ?: (24 * density).toInt()
-        return IslandGeometry.place(metrics.bounds.width(), density, cutout, statusBar)
+        return IslandGeometry.place(metrics.bounds.width(), density, cutout, statusBar, size())
     }
 
     private fun ensureView(): Boolean {
@@ -348,18 +355,34 @@ class IslandOverlay(
         drawPath(right, color)
     }
 
+    /** The user's size for what is drawn inside (Mochi, paddings, text). */
+    private fun scale(): IslandSize = box?.size ?: IslandSize.DEFAULT
+
+    /** A text style of the scale at the user's text size. */
+    private fun TextStyle.sized(z: IslandSize): TextStyle = if (z.textPct == 100) this else copy(fontSize = fontSize * z.text, lineHeight = lineHeight * z.text)
+
     @Composable
     private fun WorkingStrip(s: IslandSpec) {
         val engine = remember(s.state) { MochiEngine(clock).apply { setState(s.state, force = true) } }
+        val z = scale()
         Row(
-            Modifier.fillMaxWidth().clickable { tap("the working strip") { onOpen() } }.padding(horizontal = 18.dp, vertical = 6.dp),
+            Modifier.fillMaxWidth().clickable { tap("the working strip") { onOpen() } }.padding(horizontal = 18.dp, vertical = (6 * z.height).dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            MochiView(engine, Modifier.size(34.dp))
+            MochiView(engine, Modifier.size((34 * z.height).dp))
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
-                Text(s.agent, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (s.text.isNotBlank()) Text(s.text, color = dim, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (IslandGeometry.workingLines(z) == 2) {
+                    Text(s.agent, color = Color.White, fontSize = (13 * z.text).sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (s.text.isNotBlank()) Text(s.text, color = dim, fontSize = (12 * z.text).sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                } else {
+                    // Compact: the name and what it does on one line.
+                    val line = buildAnnotatedString {
+                        withStyle(SpanStyle(color = Color.White, fontWeight = FontWeight.SemiBold)) { append(s.agent) }
+                        if (s.text.isNotBlank()) withStyle(SpanStyle(color = dim)) { append(" · "); append(s.text) }
+                    }
+                    Text(line, fontSize = (13 * z.text).sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
             }
         }
     }
@@ -373,20 +396,21 @@ class IslandOverlay(
             IslandSpec.Kind.QUESTION -> R.string.notif_question
             else -> R.string.notif_finished
         }
+        val z = scale()
         Row(
-            Modifier.fillMaxWidth().clickable { tap("the result card") { onOpen() } }.padding(horizontal = 18.dp, vertical = 8.dp),
+            Modifier.fillMaxWidth().clickable { tap("the result card") { onOpen() } }.padding(horizontal = 18.dp, vertical = (8 * z.height).dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            MochiView(engine, Modifier.size(52.dp))
+            MochiView(engine, Modifier.size((52 * z.height).dp))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(s.agent, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    Text(s.agent, color = Color.White, fontSize = (14 * z.text).sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                     Spacer(Modifier.width(8.dp))
-                    Text(stringResource(label), color = dim, fontSize = 12.sp, maxLines = 1)
+                    Text(stringResource(label), color = dim, fontSize = (12 * z.text).sp, maxLines = 1)
                 }
                 val text = if (s.kind == IslandSpec.Kind.QUESTION) stringResource(R.string.island_answer_on_pc) else s.text
-                if (text.isNotBlank()) Text(text, color = Color.White, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (text.isNotBlank()) Text(text, color = Color.White, fontSize = (13 * z.text).sp, maxLines = IslandGeometry.resultLines(z), overflow = TextOverflow.Ellipsis)
             }
         }
     }
@@ -395,14 +419,16 @@ class IslandOverlay(
     private fun RequestCard(s: IslandSpec) {
         val engine = remember { MochiEngine(clock).apply { setState(BotState.APPROVAL, force = true) } }
         val fingerprint = s.fingerprint ?: return
+        // A request keeps its height (Deny and Allow stay 48 dp): only its text follows the user's size.
+        val z = scale()
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(Modifier.clickable { tap("the request header") { onOpen() } }, verticalAlignment = Alignment.CenterVertically) {
                 MochiView(engine, Modifier.size(40.dp))
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(s.agent, style = TypeScale.SECONDARY.style(dim), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(s.agent, style = TypeScale.SECONDARY.style(dim).sized(z), maxLines = 1, overflow = TextOverflow.Ellipsis)
                     // What kind of action, never the command: the exact text is in the app and in the lock prompt.
-                    Text(stringResource(R.string.approval_wants, s.text), style = TypeScale.HEADLINE.style(Color.White), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(stringResource(R.string.approval_wants, s.text), style = TypeScale.HEADLINE.style(Color.White).sized(z), maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -414,7 +440,7 @@ class IslandOverlay(
                     )
                 }
             }
-            Text(stringResource(if (s.canAllow) R.string.approval_hint else R.string.approval_on_computer), style = TypeScale.LABEL.style(dim), maxLines = 2)
+            Text(stringResource(if (s.canAllow) R.string.approval_hint else R.string.approval_on_computer), style = TypeScale.LABEL.style(dim).sized(z), maxLines = 2)
         }
     }
 

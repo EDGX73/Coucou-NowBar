@@ -18,7 +18,7 @@ Real screenshots from a Galaxy A12s. The pairing, chat and approval screens are 
 
 ## Build and test
 
-Needs JDK 17 and the Android SDK (platform 35). From this folder:
+Needs JDK 17 and the Android SDK (platform 36). From this folder:
 
 ```bash
 ./gradlew test assembleDebug lint
@@ -47,9 +47,18 @@ The desktop side is in `windows/src-tauri/src/phone_link`; the protocol is `docs
   Raw tool names become plain words (`core/ToolLabels.kt`); a command or path is never shown without a deliberate tap (`core/SafeText.kt`).
 - **Requests**: a sheet rises over any screen. Allow needs the fingerprint or screen lock, Deny does not, taps in the first 600 ms
   are ignored, and each request expires after 120 s. Questions from Claude Code can be answered the same way (the computer must allow it).
+- **Where agents show** (Settings > Display): **Now Bar and Live Updates**, **Show Mochi over other apps** (the island), **Both**,
+  or **Notifications only**. Every choice keeps the ordinary notifications (requests with Deny and Allow, finished or failed agents).
+  An upgrade keeps what the old island switch said (on: the island; off: notifications only). Rules: `core/Surfaces.kt` (pure, tested).
+- **Now Bar and Live Updates** (Android 16 or later): an Android Live Update about the agent the island would show, with its name,
+  its state (working, using tools, thinking, waiting for your approval, has a question, finished, error, limit) and what it does in
+  plain words, a status bar chip ("Working", "Approve", "Done"…) and a bar that follows the computer's steps. Details and limits in
+  [Now Bar and Live Updates](#now-bar-and-live-updates) below.
 - **Island over other apps** (optional, off by default): a black island from the camera cut-out drops while an agent works, shows
-  the result for 10 s and goes back up with the computer's motion. Needs Android's "Display over other apps". Rules are pure and
-  tested (`core/Island*.kt`); `ui/IslandOverlay.kt` draws.
+  the result for 10 s and goes back up with the computer's motion. Needs Android's "Display over other apps". Its **width, height and
+  text size** can be changed (70 to 115 %, 70 to 130 %, 80 to 140 %, with a 10 s preview over the app); a lower height gives a
+  compact island on one line, and a permission request always keeps its full height so Deny and Allow stay 48 dp. At 100 % it is
+  exactly the island as it shipped. Rules are pure and tested (`core/Island*.kt`); `ui/IslandOverlay.kt` draws.
 - **Chat** (a tab, when the computer offers it), **session details**, **file changes** and **plan usage** are opt-in switches on the
   computer (Settings > Android phone), all off by default; the phone is told only what it asks for and the computer allows.
 - **Pairing**: scan the QR code with the in-app camera (CameraX + zxing, offline) or paste the link; a scan or a `coucou://pair`
@@ -72,6 +81,57 @@ The desktop side is in `windows/src-tauri/src/phone_link`; the protocol is `docs
   The buttons only open a screen of the app, from a closed list (`core/LaunchScreen.kt`) through the non-exported `LaunchActivity`; none approves, denies or sends anything, and `MainActivity` still reads no intent extra. A tap on Solo, Mochi Big, Status Pill, Mochi Mood or a List row opens that agent in the app. A request is still decided in the app, behind the fingerprint, never from a Widget. Widgets show agent names, state words and colours only, are redrawn when something changes (`updatePeriodMillis` stays 0) and a redraw that would look the same is skipped. On Android 12 and later they adapt to their size (small, medium, large). Code: `core/WidgetData.kt` (pure, tested), `app/WidgetHub.kt`, one class per Widget in `app/`, `app/MochiBitmap.kt`, `app/RingBitmap.kt`.
 - **Looking at every state without a computer** (debug builds only): `adb shell am broadcast -n com.coucou.android/.app.WidgetPreviewReceiver -a com.coucou.android.debug.WIDGET_STATE --es state <disconnected|empty|working|waiting|done|live>`; `live` goes back to the real state. The receiver is in `app/src/debug` and does not exist in a release build.
 - Mochi and his 11 outfits, sounds, wardrobe (Settings), a tap on Mochi slaps him, a long press pets him.
+
+## Now Bar and Live Updates
+
+What Coucou does, with public and documented Android APIs only:
+
+- It posts one **promoted ongoing notification**, which Android calls a Live Update (`app/Notifications.kt`, `showLive`). It asks
+  for promotion with the extra that `NotificationCompat.Builder#setRequestPromotedOngoing` writes (`EXTRA_REQUEST_PROMOTED_ONGOING`,
+  public in API 36.1), sets the chip text with `setShortCriticalText` and uses `Notification.ProgressStyle` (API 36). It keeps every
+  rule Android sets for promotion: ongoing, a title, the standard or progress style, not colorized, no custom view, not a group
+  summary, and its own silent channel *Live Updates* (default importance, never minimum). The manifest declares
+  `POST_PROMOTED_NOTIFICATIONS` (a normal permission, granted at install).
+- It says what the island would, from the same plan (`IslandPlan` → `core/LiveUpdatePlan.kt`) and the same timeline
+  (`IslandTimeline`): it appears while an agent works, waits for your approval or has a question, shows how it ended for 10 s, and goes.
+  The data is the link the app already has with the computer (the `sessions` and `approval` messages): nothing changed on the computer.
+- Names and plain words only, as on the island and the widgets: never a command, a path or an answer. On a lock screen that hides
+  notification content it shows the agent's name and a state word. Tapping it opens Coucou; a request is still decided in the app,
+  behind the fingerprint, or with Deny and Allow on the request's own notification.
+- If you swipe it away it stays away until what it was about has ended, as Android asks. Nothing runs while it is hidden.
+
+What Coucou cannot promise, because it is the system's decision:
+
+- **Android 16 or later** (API 36) is needed. On Android 15 and older, or when Live Updates are turned off for Coucou in Android's
+  settings (Settings > Display > *Open settings* goes there), **Now Bar** falls back to the island (if "display over other apps" is
+  allowed) and the ordinary notifications. **Both** then shows the island only.
+- **Samsung's Now Bar is One UI's own surface.** One UI 8 (Android 16) started to show Android Live Updates from other apps in the Now
+  Bar, and One UI 9 (Android 17, now on the Galaxy S24 series) builds on them; Samsung publishes no API of its own for third-party
+  apps, and Google notes that phone makers may add criteria of their own. So Coucou asks Android for a Live Update, and One UI decides
+  whether it goes to the Now Bar, the status bar chip, the lock screen or only the shade. Coucou does not use the undocumented extras
+  that One UI 7's "Live notifications" read (a test fails if they appear in the code).
+- Settings tells you what happened on your phone: whether Live Updates are allowed for Coucou, and whether Android really promoted the
+  one that is posted (`FLAG_PROMOTED_ONGOING`, which the posting app may read). It cannot see the Now Bar itself.
+- Not checked on a real Galaxy S24 Ultra in this change: it was written against Android's documentation and the API reference, and
+  compiled and unit-tested on a computer. If One UI keeps it out of the Now Bar while Settings says it is promoted, that is One UI's
+  rule, not something the app can change; please report the One UI version.
+
+To see it: Settings > Display > **Now Bar and Live Updates**, then start an agent on the computer (or *Try the demo*) and leave the app.
+
+## A test APK from GitHub Actions
+
+Every pull request that touches `android/` (and Actions > android > **Run workflow**, on any branch) builds the app, runs the tests
+and lint, and uploads an artifact named `Coucou-Android-<version>-<commit>` with:
+
+- `Coucou-Android-<version>-<commit>.apk`: the release build (R8, no debug logs), to install on the phone;
+- `Coucou-Android-<version>-<commit>-debug.apk`: the same app with its debug logs (`adb logcat -s CoucouLive CoucouIsland`);
+- `SHA256SUMS`.
+
+Both are signed with one test key, so a new build installs over the last one and keeps the pairing. With the repository secrets
+`ANDROID_CI_KEYSTORE_BASE64` (a .jks or .p12, base64), `ANDROID_CI_KEYSTORE_PASSWORD` and, if it is not `coucou`, `ANDROID_CI_KEY_ALIAS`,
+that key is yours alone; without them the workflow makes one and keeps it in the Actions cache, which anyone who can run workflows in
+the repository can read, so it is for testing only. They cannot update an APK from the Releases page (another key): uninstall that one
+first. Release builds are still made by `android-release.yml`, signed with the release key.
 
 ## Getting the phone link running on Windows
 

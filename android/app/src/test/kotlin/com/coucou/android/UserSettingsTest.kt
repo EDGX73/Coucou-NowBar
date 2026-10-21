@@ -4,9 +4,11 @@ import com.coucou.android.core.Announce
 import com.coucou.android.core.Decision
 import com.coucou.android.core.DecisionLog
 import com.coucou.android.core.HistoryDays
+import com.coucou.android.core.IslandSize
 import com.coucou.android.core.KeyValueStore
 import com.coucou.android.core.QuietHours
 import com.coucou.android.core.StatusPolicy
+import com.coucou.android.core.SurfaceMode
 import com.coucou.android.core.UserSettings
 import com.coucou.android.mochi.BotState
 import java.time.ZoneId
@@ -54,6 +56,29 @@ class UserSettingsTest {
         assertEquals(0.05f, back.volume, 0f)
         assertFalse(back.notifyDone)
         assertEquals(QuietHours(true, 21 * 60, 7 * 60 + 30), back.quiet)
+    }
+
+    @Test fun whereAgentsShowAndTheIslandsSizeSurviveARestart() {
+        val fresh = UserSettings.load(Memory())
+        assertEquals("as before: notifications only", SurfaceMode.NOTIFICATIONS, fresh.surface)
+        assertEquals(IslandSize.DEFAULT, fresh.island)
+        val disk = Memory()
+        UserSettings.save(disk, UserSettings(surface = SurfaceMode.NOW_BAR, island = IslandSize(75, 70, 120)))
+        val back = UserSettings.load(disk)
+        assertEquals(SurfaceMode.NOW_BAR, back.surface)
+        assertEquals(IslandSize(75, 70, 120), back.island)
+    }
+
+    @Test fun theOldIslandSwitchIsKeptAsTheIslandChoice() {
+        val upgraded = Memory().apply { map[UserSettings.LEGACY_ISLAND] = true } // the app before the choice existed, switch on
+        assertEquals(SurfaceMode.ISLAND, UserSettings.load(upgraded).surface)
+        UserSettings.save(upgraded, UserSettings.load(upgraded).copy(surface = SurfaceMode.BOTH))
+        assertEquals("a saved choice wins over the old switch", SurfaceMode.BOTH, UserSettings.load(upgraded).surface)
+    }
+
+    @Test fun anIslandSizeOutOfRangeIsBroughtBackOnLoad() {
+        val disk = Memory().apply { map["island_width"] = 10; map["island_height"] = 500; map["island_text"] = 101 }
+        assertEquals(IslandSize(70, 130, 100), UserSettings.load(disk).island)
     }
 
     @Test fun volumeNeverExceedsTheSpecMaximum() {

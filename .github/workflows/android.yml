@@ -4,11 +4,16 @@ on:
     paths: ['android/**', 'docs/ANDROID_LINK.md', '.github/workflows/android.yml']
   push:
     branches: [main]
-    paths: ['android/**']
+    paths: ['android/**', '.github/workflows/android.yml']
+  # Actions → android → Run workflow: an installable APK from any branch.
+  workflow_dispatch:
 jobs:
   build:
     runs-on: ubuntu-24.04
     defaults: { run: { working-directory: android } }
+    env:
+      # Secrets cannot be read in a step's `if:`; this says whether the optional test-signing secret is set.
+      HAS_CI_KEY: ${{ secrets.ANDROID_CI_KEYSTORE_BASE64 != '' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-java@v6
@@ -22,6 +27,73 @@ jobs:
         run: ./gradlew test assembleDebug lint --console=plain
       - name: No ads, billing or analytics (condition of the author's permission)
         run: "! grep -rEi 'admob|play-services-ads|billingclient|firebase-analytics|crashlytics|com.google.android.gms' app/build.gradle.kts"
+
+      # An APK to install on a phone, from the build that just passed (lint has already made the R8 release build). Both APKs are
+      # signed with one test key, so a later build installs over an earlier one and keeps the pairing:
+      # - the repository secrets ANDROID_CI_KEYSTORE_BASE64 (a .jks or .p12, base64), ANDROID_CI_KEYSTORE_PASSWORD and, if it is not
+      #   "coucou", ANDROID_CI_KEY_ALIAS, when they are set: a key only you hold;
+      # - otherwise a key this workflow makes once and keeps in the Actions cache. That one is for testing only: whoever can run a
+      #   workflow in this repository can read the cache. Release builds are signed by android-release.yml, never with it.
+      - name: Restore the test signing key
+        if: env.HAS_CI_KEY != 'true'
+        uses: actions/cache@v6
+        with:
+          path: ~/.coucou-ci
+          key: coucou-android-test-signing-key-v1
+      - name: Signed APKs
+        id: apk
+        env:
+          CI_KEYSTORE_BASE64: ${{ secrets.ANDROID_CI_KEYSTORE_BASE64 }}
+          CI_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_CI_KEYSTORE_PASSWORD }}
+          CI_KEY_ALIAS: ${{ secrets.ANDROID_CI_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          if [ "$HAS_CI_KEY" = "true" ]; then
+            ks="$RUNNER_TEMP/ci-signing.jks"
+            echo "$CI_KEYSTORE_BASE64" | base64 -d > "$ks"
+            export KS_PASS="$CI_KEYSTORE_PASSWORD"
+            alias="${CI_KEY_ALIAS:-coucou}"
+            from="the repository's ANDROID_CI_KEYSTORE secret"
+          else
+            ks="$HOME/.coucou-ci/test-signing.p12"
+            export KS_PASS="coucou-test-signing"
+            alias="coucou-test"
+            if [ ! -f "$ks" ]; then
+              mkdir -p "$(dirname "$ks")"
+              keytool -genkeypair -keystore "$ks" -storetype PKCS12 -storepass "$KS_PASS" -alias "$alias" \
+                -keyalg RSA -keysize 3072 -validity 10000 -dname "CN=Coucou for Android test build"
+            fi
+            from="this workflow's cached test key"
+          fi
+          bt="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          v=$(sed -nE 's/^[[:space:]]*versionName = "([^"]+)".*/\1/p' app/build.gradle.kts)
+          test -n "$v" || { echo "no versionName in app/build.gradle.kts"; exit 1; }
+          name="Coucou-Android-$v-${GITHUB_SHA::7}"
+          release=app/build/outputs/apk/release/app-release-unsigned.apk
+          debug=app/build/outputs/apk/debug/app-debug.apk
+          test -f "$release" && test -f "$debug"
+          mkdir -p apk
+          "$bt/apksigner" sign --ks "$ks" --ks-pass env:KS_PASS --ks-key-alias "$alias" --out "apk/$name.apk" "$release"
+          "$bt/apksigner" sign --ks "$ks" --ks-pass env:KS_PASS --ks-key-alias "$alias" --out "apk/$name-debug.apk" "$debug"
+          "$bt/apksigner" verify --print-certs "apk/$name.apk"
+          "$bt/apksigner" verify "apk/$name-debug.apk"
+          rm -f "$RUNNER_TEMP/ci-signing.jks" apk/*.idsig
+          (cd apk && sha256sum *.apk > SHA256SUMS)
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Coucou for Android $v (${GITHUB_SHA::7})"
+            echo
+            echo "Download the **$name** artifact below, unzip it and open \`$name.apk\` on the phone (Android 11 or later)."
+            echo "\`$name-debug.apk\` is the same app with its debug logs (\`adb logcat -s CoucouLive CoucouIsland\`)."
+            echo "Both are signed with $from: they install over each other and over earlier builds signed with it, but not over"
+            echo "an APK from the Releases page (another key: uninstall that one first)."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.apk.outputs.name }}
+          path: android/apk/
+          if-no-files-found: error
+
       - uses: actions/upload-artifact@v7
         if: always()
         with:

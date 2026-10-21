@@ -38,6 +38,10 @@ data class UserSettings(
     val outfit: String = com.coucou.android.mochi.outfit.Wardrobe.FOLLOW,
     /** Use the relay when the computer is not reachable on this network (only matters when the pairing includes one). */
     val useRelay: Boolean = true,
+    /** Where agents show outside the app: the Now Bar (a Live Update), the island, both, or notifications only. */
+    val surface: SurfaceMode = SurfaceMode.NOTIFICATIONS,
+    /** The island's width, height and text size. */
+    val island: IslandSize = IslandSize.DEFAULT,
 ) {
     companion object {
         private const val SOUND = "sound_on"
@@ -48,6 +52,12 @@ data class UserSettings(
         private const val Q_TO = "quiet_to"
         private const val OUTFIT = "outfit_choice"
         private const val RELAY = "use_relay"
+        private const val SURFACE = "surface_mode"
+        /** The island's on/off switch before [SurfaceMode] existed (written by OverlayChoice, which still mirrors the island's half). */
+        const val LEGACY_ISLAND = "overlay"
+        private const val ISLAND_W = "island_width"
+        private const val ISLAND_H = "island_height"
+        private const val ISLAND_T = "island_text"
 
         fun load(store: KeyValueStore): UserSettings {
             val d = UserSettings()
@@ -62,6 +72,10 @@ data class UserSettings(
                 ),
                 outfit = com.coucou.android.mochi.outfit.Wardrobe.parseLocal(store.getString(OUTFIT, d.outfit)),
                 useRelay = store.getBoolean(RELAY, d.useRelay),
+                surface = SurfaceMode.parse(store.getString(SURFACE, ""), islandSwitch = store.getBoolean(LEGACY_ISLAND, false)),
+                island = IslandSize(
+                    store.getInt(ISLAND_W, d.island.widthPct), store.getInt(ISLAND_H, d.island.heightPct), store.getInt(ISLAND_T, d.island.textPct),
+                ).clamped(),
             )
         }
 
@@ -74,6 +88,11 @@ data class UserSettings(
             store.put(Q_TO, QuietHours.wrap(s.quiet.toMin))
             store.put(OUTFIT, com.coucou.android.mochi.outfit.Wardrobe.parseLocal(s.outfit))
             store.put(RELAY, s.useRelay)
+            store.put(SURFACE, s.surface.key)
+            val island = s.island.clamped()
+            store.put(ISLAND_W, island.widthPct)
+            store.put(ISLAND_H, island.heightPct)
+            store.put(ISLAND_T, island.textPct)
         }
     }
 }
