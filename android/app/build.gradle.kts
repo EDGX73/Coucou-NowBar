@@ -17,7 +17,9 @@ val releaseKeyPassword = signingValue("COUCOU_KEY_PASSWORD") ?: releaseStorePass
 
 android {
     namespace = "com.coucou.android"
-    compileSdk = 35
+    // 36 (Android 16) for the Live Update: ProgressStyle, the status bar chip's text, canPostPromotedNotifications. The app still
+    // targets 35, so none of Android 16's behaviour changes apply; every newer call is behind a version check.
+    compileSdk = 36
     defaultConfig {
         applicationId = "com.coucou.android"
         minSdk = 30
@@ -90,7 +92,7 @@ val verifyReleaseNoLogs by tasks.registering {
     doLast {
         val apks = apkDir.get().asFile.walkTopDown().filter { it.extension == "apk" }.toList()
         check(apks.size == 1) { "expected one release APK, found ${apks.size}" }
-        val leftovers = listOf("CoucouOverlay", "CoucouLaunch", "CoucouDiscovery", "CoucouIsland", "island failed", "cannot browse", "ignored an early tap")
+        val leftovers = listOf("CoucouOverlay", "CoucouLaunch", "CoucouDiscovery", "CoucouIsland", "CoucouLive", "island failed", "cannot browse", "ignored an early tap", "promotable=")
         ZipFile(apks.single()).use { zip ->
             for (entry in zip.entries().asSequence().filter { it.name.endsWith(".dex") }) {
                 val text = String(zip.getInputStream(entry).readBytes(), Charsets.ISO_8859_1)

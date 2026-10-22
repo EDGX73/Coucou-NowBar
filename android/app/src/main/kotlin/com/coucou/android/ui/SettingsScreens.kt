@@ -32,7 +32,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.annotation.StringRes
 import androidx.compose.ui.draw.alpha
 import com.coucou.android.core.IconKind
 import com.coucou.android.core.Spacing
@@ -45,14 +47,19 @@ import com.coucou.android.app.AppModel
 import com.coucou.android.app.Mode
 import com.coucou.android.core.HistoryDays
 import com.coucou.android.core.HomeText
+import com.coucou.android.core.IslandSize
+import com.coucou.android.core.LiveUpdateLine
 import com.coucou.android.core.QuietHours
 import com.coucou.android.core.RelayLineKind
 import com.coucou.android.core.RelayStatus
+import com.coucou.android.core.SurfaceMode
+import com.coucou.android.core.SurfacePolicy
 import com.coucou.android.link.LinkState
 import com.coucou.android.sound.SoundVolume
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
+import kotlin.math.roundToInt
 
 /**
  * The screen's title on one line; a long title is cut with "…". Sub-pages pass [onBack] and get a Back
@@ -127,10 +134,14 @@ val BarClearance = 96.dp
 
 /**
  * Settings, a tab. Grouped, each group one panel: your computer (with Disconnect at the bottom, away
- * from the everyday switches), the island, sound, notices, more, and About (Louis Raillé's required notice).
+ * from the everyday switches), where agents show (Now Bar, island, both or notifications) and the island's
+ * size, sound, notices, more, and About (Louis Raillé's required notice).
  */
 @Composable
-fun SettingsScreen(model: AppModel, onHistory: () -> Unit, onGallery: () -> Unit, onWardrobe: () -> Unit, onOverlay: (Boolean) -> Unit, onDiagnostics: () -> Unit, onLicences: () -> Unit) {
+fun SettingsScreen(
+    model: AppModel, onHistory: () -> Unit, onGallery: () -> Unit, onWardrobe: () -> Unit, onOverlay: (Boolean) -> Unit, onDiagnostics: () -> Unit, onLicences: () -> Unit,
+    onSurface: (SurfaceMode) -> Unit, onLiveSettings: () -> Unit, onPreview: () -> Unit,
+) {
     val s = model.settings
     val uri = LocalUriHandler.current
     val t = tokens()
@@ -174,7 +185,12 @@ fun SettingsScreen(model: AppModel, onHistory: () -> Unit, onGallery: () -> Unit
         if (model.batteryHintVisible) item { BatteryCard(model) }
 
         item { SectionHeading(stringResource(R.string.settings_section_display)) }
-        item { Panel { SettingSwitch(stringResource(R.string.overlay_title), stringResource(R.string.overlay_hint), model.overlayOn, onOverlay) } }
+        item { SurfacePanel(model, onSurface, onLiveSettings, onOverlay) }
+        // The island's size, while the island is in use (chosen, or standing in for the Now Bar).
+        if (model.surfacePlan.island) {
+            item { SectionHeading(stringResource(R.string.island_size_title)) }
+            item { IslandSizePanel(model, onPreview) }
+        }
 
         item { SectionHeading(stringResource(R.string.settings_section_sound)) }
         item {
@@ -243,6 +259,105 @@ fun SettingsScreen(model: AppModel, onHistory: () -> Unit, onGallery: () -> Unit
             }
         }
         item { Spacer(Modifier.height(Gutter)) }
+    }
+}
+
+/** The four choices of where agents show, in this order; the island keeps the words of the switch it replaces. */
+private val SURFACE_OPTIONS = listOf(
+    Triple(SurfaceMode.NOW_BAR, R.string.surface_now_bar, R.string.surface_now_bar_hint),
+    Triple(SurfaceMode.ISLAND, R.string.overlay_title, R.string.overlay_hint),
+    Triple(SurfaceMode.BOTH, R.string.surface_both, R.string.surface_both_hint),
+    Triple(SurfaceMode.NOTIFICATIONS, R.string.surface_notifications, R.string.surface_notifications_hint),
+)
+
+/**
+ * Where agents show while Coucou is not on screen: one choice of four, then what this phone does with a Live Update, in a
+ * sentence, with Android's own switch one tap away. Picking the island (alone or with the Now Bar) asks for "display over other
+ * apps" if it is not allowed yet, as the old switch did.
+ */
+@Composable
+private fun SurfacePanel(model: AppModel, onSurface: (SurfaceMode) -> Unit, onLiveSettings: () -> Unit, onOverlay: (Boolean) -> Unit) {
+    val t = tokens()
+    val chosen = model.settings.surface
+    val line = SurfacePolicy.line(chosen, model.liveSupport, model.livePromoted)
+    Panel {
+        SURFACE_OPTIONS.forEachIndexed { i, (mode, title, hint) ->
+            if (i > 0) RowDivider()
+            ListRow(
+                stringResource(title), hint = stringResource(hint),
+                modifier = Modifier.clickable(role = Role.RadioButton) { onSurface(mode) }.semantics { selected = mode == chosen },
+                trailing = { if (mode == chosen) CoucouIcon(IconKind.CHECK, tint = t.online.c(), size = 22.dp) },
+            )
+        }
+        val text = when (line) {
+            LiveUpdateLine.NONE -> null
+            LiveUpdateLine.READY -> stringResource(R.string.live_ready)
+            LiveUpdateLine.SHOWN_PROMOTED -> stringResource(R.string.live_promoted_yes)
+            LiveUpdateLine.SHOWN_PLAIN -> stringResource(R.string.live_promoted_no)
+            LiveUpdateLine.OLD_ANDROID -> stringResource(R.string.live_old_android, android.os.Build.VERSION.RELEASE.orEmpty())
+            LiveUpdateLine.NOTIFICATIONS_OFF -> stringResource(R.string.live_notifications_off)
+            LiveUpdateLine.TURNED_OFF -> stringResource(R.string.live_turned_off)
+        }
+        if (text != null) {
+            RowDivider()
+            Column(Modifier.padding(Spacing.INSIDE.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(text, style = TypeScale.SECONDARY.style(t.textDim.c()))
+                if (model.surfacePlan.islandStandsIn) Text(stringResource(R.string.live_island_instead), style = TypeScale.SECONDARY.style(t.textDim.c()))
+                if (line.offersSettings) PillButton(stringResource(R.string.live_open_settings), onLiveSettings, Modifier.fillMaxWidth())
+            }
+        }
+        // The island is wanted but Android does not allow it yet: the one thing to do about it, here too.
+        if (model.overlayWished && !model.overlayPermission) {
+            RowDivider()
+            ListRow(
+                stringResource(R.string.overlay_missing),
+                trailing = { TextButton(onClick = { onOverlay(true) }) { Text(stringResource(R.string.overlay_allow), maxLines = 1) } },
+            )
+        }
+    }
+}
+
+/**
+ * The island's width, height and text size, in steps of 5 %, with a preview over Coucou itself and a way back to the size it
+ * shipped with. The rules for what fits are in [com.coucou.android.core.IslandGeometry] (pure, tested).
+ */
+@Composable
+private fun IslandSizePanel(model: AppModel, onPreview: () -> Unit) {
+    val t = tokens()
+    val s = model.settings
+    val z = s.island
+    fun set(next: IslandSize) = model.updateSettings(s.copy(island = next.clamped()))
+    Panel {
+        SizeSlider(R.string.island_width, z.widthPct, IslandSize.WIDTH) { set(z.copy(widthPct = it)) }
+        RowDivider()
+        SizeSlider(R.string.island_height, z.heightPct, IslandSize.HEIGHT) { set(z.copy(heightPct = it)) }
+        RowDivider()
+        SizeSlider(R.string.island_text, z.textPct, IslandSize.TEXT) { set(z.copy(textPct = it)) }
+        RowDivider()
+        Column(Modifier.padding(Spacing.INSIDE.dp), verticalArrangement = Arrangement.spacedBy(Spacing.GAP.dp)) {
+            Text(stringResource(R.string.island_size_hint), style = TypeScale.SECONDARY.style(t.textDim.c()))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                PillButton(stringResource(R.string.island_preview), onPreview, Modifier.weight(1f), PillKind.PRIMARY)
+                PillButton(stringResource(R.string.island_reset), { set(IslandSize.DEFAULT) }, Modifier.weight(1f), enabled = z != IslandSize.DEFAULT)
+            }
+        }
+    }
+}
+
+/** One of the island's sizes: its name and percentage, and a slider that moves in steps of 5 %. */
+@Composable
+private fun SizeSlider(@StringRes label: Int, pct: Int, range: IntRange, onChange: (Int) -> Unit) {
+    val t = tokens()
+    val name = stringResource(label)
+    Column(Modifier.padding(horizontal = Spacing.INSIDE.dp, vertical = 8.dp)) {
+        Row {
+            Text(name, Modifier.weight(1f), style = TypeScale.BODY.style(t.text.c()))
+            Text(stringResource(R.string.island_pct, pct), style = TypeScale.SECONDARY.style(t.textDim.c()))
+        }
+        CoucouSlider(
+            value = pct.toFloat(), onChange = { onChange(IslandSize.snap(it.roundToInt(), range)) },
+            valueRange = range.first.toFloat()..range.last.toFloat(), label = name,
+        )
     }
 }
 

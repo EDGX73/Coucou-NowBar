@@ -16,7 +16,12 @@ import com.coucou.android.core.Decision
 import com.coucou.android.core.DecisionLog
 import com.coucou.android.core.KeyValueStore
 import com.coucou.android.core.IslandPlan
+import com.coucou.android.core.IslandSpec
+import com.coucou.android.core.IslandTimeline
 import com.coucou.android.core.OverlayChoice
+import com.coucou.android.core.SurfaceMode
+import com.coucou.android.core.SurfacePlan
+import com.coucou.android.core.SurfacePolicy
 import com.coucou.android.core.StatusPolicy
 import com.coucou.android.core.UserSettings
 import com.coucou.android.core.OverlayPolicy
@@ -271,13 +276,22 @@ class AppModel(private val context: Context) : LinkListener {
     }
 
     private val choice = OverlayChoice(object : WishStore {
-        override fun read() = prefs.getBoolean("overlay", false)
+        override fun read() = prefs.getBoolean(UserSettings.LEGACY_ISLAND, false)
         // commit(): a tiny file, and it must survive the process being killed while the user is in Settings.
-        override fun write(on: Boolean) { prefs.edit().putBoolean("overlay", on).commit() }
+        override fun write(on: Boolean) { prefs.edit().putBoolean(UserSettings.LEGACY_ISLAND, on).commit() }
     })
 
-    /** The user's wish for the pill over other apps (off until they turn it on). Saved when they tap. */
-    var overlayWished by mutableStateOf(choice.wished); private set
+    /** Whether this phone shows Coucou's Live Updates now (Android 16 or later, and not turned off): re-read when the app comes back. */
+    var liveSupport by mutableStateOf(notifier.liveSupport()); private set
+
+    /** Whether Android promoted the Live Update posted now; null when none is posted, or on Android 15 and older. */
+    var livePromoted by mutableStateOf<Boolean?>(null); private set
+
+    /** What shows outside the app: the choice in Settings, with the island standing in for a Live Update this phone cannot show. */
+    val surfacePlan: SurfacePlan get() = SurfacePolicy.plan(settings.surface, liveSupport)
+
+    /** The island is wanted: chosen in Settings (alone or with the Now Bar), or standing in for the Now Bar. */
+    val overlayWished: Boolean get() = surfacePlan.island
 
     /** The system permission "display over other apps", re-read when the app comes to the front. */
     var overlayPermission by mutableStateOf(false); private set
@@ -294,34 +308,82 @@ class AppModel(private val context: Context) : LinkListener {
             }
         }
 
+    private val clockMs = { android.os.SystemClock.elapsedRealtimeNanos() / 1e6 }
+
     private val overlay = IslandOverlay(
-        context, { android.os.SystemClock.elapsedRealtimeNanos() / 1e6 },
+        context, clockMs,
         onAllow = { notifier.openAllow(it) },
         onDeny = { decide(it, allow = false) },
         onOpen = { notifier.openApp() },
+        size = { settings.island },
     )
+
+    /** The Live Update for the Now Bar, the status bar chip and the lock screen (Android 16 and later). */
+    private val live = LiveUpdates(notifier, clockMs)
 
     fun overlayPermitted() = overlay.permitted()
 
-    /** What the switch shows: wished and allowed by the system. */
-    val overlayOn: Boolean get() = overlayWished && overlayPermission
-
     fun refreshOverlayPermission() { overlayPermission = overlay.permitted() }
 
-    /** The user tapped the switch: remember the choice right now (see [OverlayChoice]). */
-    fun useOverlay(on: Boolean) {
-        choice.choose(on)
-        overlayWished = on
+    /**
+     * Settings > Display: where agents show. Saved at the tap, before Android's permission screen may open: the island's half also
+     * goes to the old switch's key with commit() (see [OverlayChoice]), which writes the whole choice to disk at once.
+     */
+    fun useSurface(mode: SurfaceMode) {
+        updateSettings(settings.copy(surface = mode))
+        choice.choose(mode.wantsIsland)
         refreshOverlayPermission()
+        refreshLiveSupport()
         refreshIsland()
+    }
+
+    /**
+     * Android's answer may have changed in its own settings: look again when the app comes to the front. Only the Live Update
+     * follows at once. Coucou is on screen, so the island is away; it follows the new plan when the user leaves the app
+     * (`inForeground`). This keeps onStart from ever reaching the island's window (lint: RepeatOnLifecycleWrongUsage).
+     */
+    fun refreshLiveSupport() {
+        val now = notifier.liveSupport()
+        livePromoted = notifier.livePromoted()
+        if (now != liveSupport) {
+            liveSupport = now
+            refreshLive()
+        }
     }
 
     private fun islandAllowed(): Boolean {
         val connected = mode != Mode.PAIRED || linkState == LinkState.CONNECTED
-        val why = OverlayPolicy.blocker(choice.wished, overlay.permitted(), inForeground)
+        val why = OverlayPolicy.blocker(surfacePlan.island, overlay.permitted(), inForeground)
             ?: if (!connected) "not connected to a computer" else null
         if (why != null) Log.d("CoucouOverlay", "no island: $why")
         return why == null
+    }
+
+    /** The Live Update may show: chosen and possible on this phone, with something to say (connected to the computer, or the demo). */
+    private fun liveAllowed(): Boolean = surfacePlan.liveUpdate && when (mode) {
+        Mode.NONE -> false
+        Mode.DEMO -> true
+        Mode.PAIRED -> linkState == LinkState.CONNECTED
+    }
+
+    /** The user swiped the Live Update away (its delete intent). */
+    fun liveDismissed() = live.onDismissed()
+
+    /** Until when the island shows its preview over Coucou itself (by the island's clock). */
+    private var previewUntil = 0.0
+
+    private fun previewing() = clockMs() < previewUntil
+
+    /**
+     * Settings > Display, "Preview": the island with sample words for 10 s, over Coucou itself, so a new size is seen where it will
+     * be. False when Android does not allow Coucou to draw over other apps (yet).
+     */
+    fun previewIsland(): Boolean {
+        if (!overlay.permitted()) return false
+        overlay.hide() // measured again, with the new size
+        previewUntil = clockMs() + IslandTimeline.HOLD_MS
+        overlay.flash(IslandSpec(IslandSpec.Kind.WORKING, PREVIEW_PILL, "Claude Code", BotState.WORKING, "Running a command"))
+        return true
     }
 
     /**
@@ -348,11 +410,21 @@ class AppModel(private val context: Context) : LinkListener {
 
     private fun refreshIsland() {
         pushGlance()
+        refreshLive()
         if (!islandAllowed()) {
-            overlay.hide()
+            if (!previewing()) overlay.hide()
             return
         }
         overlay.setActive(IslandPlan.active(sessions, approvals, allowed = true, this::agentName))
+    }
+
+    /** The Live Update says what the island would: the same plan, from the same sessions and requests. */
+    private fun refreshLive() {
+        if (!liveAllowed()) {
+            live.hide()
+            return
+        }
+        live.setActive(IslandPlan.active(sessions, approvals, allowed = true, this::agentName), sessions)
     }
 
     /**
@@ -731,6 +803,7 @@ class AppModel(private val context: Context) : LinkListener {
                 if (a.sound && sound != null) sounds.play(sound)
                 if (a.notify) notifier.showStatus(s.pillId, name, s.state, s.statusText)
                 IslandPlan.flash(prev, s, settings, minute, islandAllowed(), this::agentName)?.let { overlay.flash(it) }
+                IslandPlan.flash(prev, s, settings, minute, liveAllowed(), this::agentName)?.let { live.flash(it, sessions) }
                 // The agent moved on: the notice about the last state is stale.
                 if (prev != s.state && s.state !in NEWSWORTHY) notifier.cancelStatus(s.pillId)
             }
@@ -863,5 +936,7 @@ class AppModel(private val context: Context) : LinkListener {
         /** How long the sheet waits for the lines of a file before saying it could not load them. */
         const val DIFF_WAIT_MS = 10_000L
         val NEWSWORTHY = setOf(BotState.QUESTION, BotState.ERROR, BotState.FINISHED, BotState.RATELIMIT)
+        /** Not a pill of the catalog: the sample the island shows while its size is being changed. */
+        const val PREVIEW_PILL = "preview"
     }
 }

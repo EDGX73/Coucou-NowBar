@@ -10,13 +10,22 @@ import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
 import android.net.Uri
+import android.os.Build
+import android.os.Bundle
 import android.util.Log
+import androidx.annotation.RequiresApi
 import com.coucou.android.MainActivity
 import com.coucou.android.R
 import com.coucou.android.core.ApprovalSheetPlan
 import com.coucou.android.core.Glance
 import com.coucou.android.core.GlanceTone
+import com.coucou.android.core.IslandSpec
+import com.coucou.android.core.LiveProgress
+import com.coucou.android.core.LiveUpdate
+import com.coucou.android.core.LiveUpdatePlan
+import com.coucou.android.core.LiveUpdateSupport
 import com.coucou.android.core.OverlayPolicy
+import com.coucou.android.core.SurfacePolicy
 import com.coucou.android.core.SafeText
 import com.coucou.android.core.ToolLabels
 import com.coucou.android.link.ApprovalRequest
@@ -25,7 +34,8 @@ import com.coucou.android.mochi.BotState
 /**
  * Notifications: one quiet ongoing notification for the link, and a loud one per approval.
  * Deny acts straight from the notification. Allow always opens the app for the biometric
- * check first, and the command is hidden on the lock screen.
+ * check first, and the command is hidden on the lock screen. With the Now Bar chosen in
+ * Settings, also the Live Update about the agent at work ([showLive]).
  */
 class Notifications(private val context: Context) {
     private val nm = context.getSystemService(NotificationManager::class.java)
@@ -65,6 +75,16 @@ class Notifications(private val context: Context) {
                     Uri.parse("${ContentResolver.SCHEME_ANDROID_RESOURCE}://${context.packageName}/${R.raw.approval}"),
                     AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION).build(),
                 )
+            },
+        )
+        // The Live Update: silent, but above "low" so the lock screen and Samsung's Now Bar show it (a Live Update may never be on
+        // a channel of minimum importance). Only used when the user picks the Now Bar in Settings.
+        nm.createNotificationChannel(
+            NotificationChannel(CH_LIVE, "Live Updates", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                description = "What your agents are doing, in the status bar, on the lock screen and in Samsung's Now Bar"
+                setSound(null, null)
+                enableVibration(false)
+                setShowBadge(false)
             },
         )
     }
@@ -206,6 +226,87 @@ class Notifications(private val context: Context) {
         runCatching { open(null, false, 0).send() }
     }
 
+    /**
+     * The Live Update (Settings > Display > Now Bar): one promoted ongoing notification about the agent the island would show, with
+     * public, documented APIs only. It asks Android to promote it with the extra NotificationCompat.Builder#setRequestPromotedOngoing
+     * writes (Notification.EXTRA_REQUEST_PROMOTED_ONGOING; the platform's own setter came with API 36.1), and keeps every rule of a
+     * Live Update: ongoing, a title, the standard or the progress style, not colorized, no custom view, not a group summary, a channel
+     * above minimum importance. Android, then the phone maker, decide where it shows (the status bar chip, the lock screen, the top of
+     * the shade, Samsung's Now Bar): asking is all an app can do. Names and plain words only, as on the island; tapping it opens Coucou.
+     *
+     * Returns whether it has everything Android needs to promote it (Notification.hasPromotableCharacteristics), null before Android 16.
+     */
+    fun showLive(u: LiveUpdate): Boolean? {
+        val dismissed = PendingIntent.getBroadcast(
+            context, LIVE_ID, Intent(context, ActionReceiver::class.java).setAction(ACTION_LIVE_DISMISSED),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val b = Notification.Builder(context, CH_LIVE)
+            .setSmallIcon(R.drawable.ic_stat_mochi)
+            .setContentTitle(u.title)
+            .setContentText(u.text)
+            .setSubText(u.status)
+            .setColor(u.tone.argb) // an accent only: a Live Update must not be colorized
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setShowWhen(false)
+            .setCategory(if (u.kind == IslandSpec.Kind.WORKING) Notification.CATEGORY_PROGRESS else Notification.CATEGORY_STATUS)
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setPublicVersion(
+                Notification.Builder(context, CH_LIVE).setSmallIcon(R.drawable.ic_stat_mochi)
+                    .setContentTitle(u.title).setContentText(u.publicText).build(),
+            )
+            .setContentIntent(open(null, false, 0))
+            // Swiped away: not posted again until what it was about has ended (Android's guidance for Live Updates).
+            .setDeleteIntent(dismissed)
+            .addExtras(Bundle().apply { putBoolean(EXTRA_REQUEST_PROMOTED_ONGOING, true) })
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+            b.setShortCriticalText(u.chip.take(LiveUpdatePlan.CHIP_MAX))
+            progressStyle(u)?.let { b.setStyle(it) }
+        }
+        val n = b.build()
+        runCatching { nm.notify(LIVE_TAG, LIVE_ID, n) } // POST_NOTIFICATIONS may be denied: the island and the app still work
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.BAKLAVA) return null
+        val promotable = n.hasPromotableCharacteristics()
+        Log.d("CoucouLive", "live update ${u.kind}, promotable=$promotable")
+        return promotable
+    }
+
+    /** The bar: moving while the agent works, its steps when the computer counts them, full when it has finished. */
+    @RequiresApi(Build.VERSION_CODES.BAKLAVA)
+    private fun progressStyle(u: LiveUpdate): Notification.ProgressStyle? = when (val p = u.progress) {
+        LiveProgress.None -> null
+        LiveProgress.Moving -> Notification.ProgressStyle().setProgressIndeterminate(true)
+        is LiveProgress.Steps -> Notification.ProgressStyle().setStyledByProgress(true)
+            .setProgressSegments(listOf(Notification.ProgressStyle.Segment(p.total).setColor(u.tone.argb)))
+            .setProgress(p.done)
+        LiveProgress.Full -> Notification.ProgressStyle()
+            .setProgressSegments(listOf(Notification.ProgressStyle.Segment(1).setColor(u.tone.argb)))
+            .setProgress(1)
+    }
+
+    fun cancelLive() {
+        runCatching { nm.cancel(LIVE_TAG, LIVE_ID) }
+    }
+
+    /** Whether Android shows Coucou's Live Updates now; the user can turn them off in Android's settings at any time. */
+    fun liveSupport(): LiveUpdateSupport {
+        val enabled = runCatching { nm.areNotificationsEnabled() }.getOrDefault(true)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.BAKLAVA) return SurfacePolicy.support(Build.VERSION.SDK_INT, enabled, canPostPromoted = false)
+        val promoted = runCatching { nm.canPostPromotedNotifications() }.getOrDefault(false)
+        return SurfacePolicy.support(Build.VERSION.SDK_INT, enabled, promoted)
+    }
+
+    /**
+     * Whether Android promoted the Live Update that is posted now (FLAG_PROMOTED_ONGOING, which the system sets and the posting app may
+     * read). Null when none is posted, or before Android 16. It says nothing about the Now Bar: One UI may apply rules of its own.
+     */
+    fun livePromoted(): Boolean? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.BAKLAVA) return null
+        val posted = runCatching { nm.activeNotifications.firstOrNull { it.tag == LIVE_TAG && it.id == LIVE_ID } }.getOrNull() ?: return null
+        return (posted.notification.flags and Notification.FLAG_PROMOTED_ONGOING) != 0
+    }
+
     companion object {
         const val CH_LINK = "link"
         private const val WAKE_MS = 6_000L
@@ -215,6 +316,13 @@ class Notifications(private val context: Context) {
         private const val STATUS_TAG = "status"
         const val ONGOING_ID = 1
         const val ACTION_DENY = "com.coucou.android.DENY"
+        const val CH_LIVE = "live_updates"
+        /** The Live Update has a tag of its own, so its id can never meet a request's. */
+        const val LIVE_TAG = "live"
+        const val LIVE_ID = 3
+        const val ACTION_LIVE_DISMISSED = "com.coucou.android.LIVE_DISMISSED"
+        /** The documented value of Notification.EXTRA_REQUEST_PROMOTED_ONGOING (public in API 36.1; NotificationCompat writes the same). */
+        const val EXTRA_REQUEST_PROMOTED_ONGOING = "android.requestPromotedOngoing"
         const val EXTRA_FP = "fingerprint"
         const val EXTRA_ALLOW = "allow"
         /** Even ids for the request, +1 for its Allow action; never collides with ONGOING_ID. */
@@ -222,11 +330,19 @@ class Notifications(private val context: Context) {
     }
 }
 
-/** Handles the Deny button. Denying needs no biometric check: it can only make things safer. */
+/**
+ * Handles the Deny button, and the Live Update being swiped away. Denying needs no biometric check: it can only make things safer.
+ * Not exported: only our own notifications can reach it.
+ */
 class ActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        val model = (context.applicationContext as CoucouApp).model
+        if (intent.action == Notifications.ACTION_LIVE_DISMISSED) {
+            model.liveDismissed()
+            return
+        }
         if (intent.action != Notifications.ACTION_DENY) return
         val fp = intent.getStringExtra(Notifications.EXTRA_FP) ?: return
-        (context.applicationContext as CoucouApp).model.decide(fp, allow = false)
+        model.decide(fp, allow = false)
     }
 }

@@ -125,6 +125,7 @@ import com.coucou.android.ui.ChatScreen
 import com.coucou.android.ui.MochiTouch
 import com.coucou.android.ui.HistoryScreen
 import com.coucou.android.ui.SettingsScreen
+import com.coucou.android.core.SurfaceMode
 import com.coucou.android.ui.StatusColors
 import com.coucou.android.ui.Gap
 import com.coucou.android.ui.Gutter
@@ -174,6 +175,7 @@ class MainActivity : ComponentActivity() {
                                 model, onHistory = { screen = Screen.HISTORY },
                                 onGallery = { screen = Screen.GALLERY }, onWardrobe = { screen = Screen.WARDROBE }, onOverlay = ::setOverlay,
                                 onDiagnostics = { screen = Screen.DIAGNOSTICS }, onLicences = { screen = Screen.LICENCES },
+                                onSurface = ::setSurface, onLiveSettings = ::openLiveUpdateSettings, onPreview = ::previewIsland,
                             )
                             Screen.LICENCES -> LicencesScreen(onBack = { screen = Screen.SETTINGS })
                             Screen.WARDROBE -> WardrobeScreen(model, onBack = { screen = Screen.SETTINGS })
@@ -219,6 +221,7 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         model.inForeground = true
         model.refreshOverlayPermission() // maybe granted meanwhile, from this app's switch or Android's settings
+        model.refreshLiveSupport() // Live Updates may have been turned on or off in Android's settings
         model.refreshBattery() // the battery setting may have been changed in Android's screen
     }
 
@@ -233,11 +236,34 @@ class MainActivity : ComponentActivity() {
      * soon as the permission is there.
      */
     private fun setOverlay(on: Boolean) {
-        model.useOverlay(on)
         if (on && !model.overlayPermitted()) {
             model.message = getString(R.string.msg_overlay_permission)
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
         }
+    }
+
+    /** Settings > Display: where agents show. Saved first (see [com.coucou.android.app.AppModel.useSurface]); the island then asks for its permission. */
+    private fun setSurface(mode: SurfaceMode) {
+        model.useSurface(mode)
+        if (mode.wantsIsland) setOverlay(true)
+    }
+
+    /**
+     * Android's own screen for Coucou's Live Updates (Android 16 and later), where the user turns them on or off. A phone may have
+     * no such screen: then Coucou's notification settings, then the app's details.
+     */
+    private fun openLiveUpdateSettings() {
+        val screens = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) add(Intent(Settings.ACTION_APP_NOTIFICATION_PROMOTION_SETTINGS))
+            add(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS))
+        }.map { it.putExtra(Settings.EXTRA_APP_PACKAGE, packageName) } +
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+        for (i in screens) if (runCatching { startActivity(i) }.isSuccess) return
+    }
+
+    /** Settings > Display, "Preview": the island over Coucou for 10 s, at the size just chosen. */
+    private fun previewIsland() {
+        if (!model.previewIsland()) setOverlay(true)
     }
 
     override fun onNewIntent(intent: Intent) {
